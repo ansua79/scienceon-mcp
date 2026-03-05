@@ -1,0 +1,30 @@
+# 참고용 원본 (배포 불필요)
+kisti-mcp-ref/
+
+# Claude 작업 내역
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
