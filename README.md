@@ -4,9 +4,22 @@
 
 KISTI ScienceON OpenAPI를 MCP(Model Context Protocol) 서버로 래핑한 프로젝트입니다.
 Claude 등 MCP 클라이언트에서 ScienceON의 논문, 특허, 보고서, 동향, 과학향기, 연구자, 연구기관, 기술트렌드, 과학기술뉴스를 직접 검색할 수 있습니다.
-2025년3월 현재 ScienceON API Gateway에서 제공하는 모든 API를 활용할 수 있습니다.
+2026년6월 현재 ScienceON API Gateway에서 제공하는 모든 API를 활용할 수 있습니다.
 
 > MCP를 지원하는 모든 클라이언트(Claude Desktop, Cursor 등)에서 사용 가능합니다.
+
+> 💡 **설치가 어려운 초보자라면?**
+> 직접 설정 파일을 편집하지 않고 클릭만으로 설치·관리할 수 있는 GUI 도구
+> **[STIMCP Manager](https://github.com/ansua79/stimcp-manager)** 를 사용하세요.
+
+## 변경 이력
+
+### v1.0.1
+- 모든 ScienceON API 호출에 `User-Agent: scienceon-mcp/<버전>` 헤더 추가 (서버 측 호출 식별용)
+- 텍스트 정제 개선: KISTI/NTIS 응답에 섞여 나오는 비표준 엔티티(`&quo;`, `&apos;`)를 정상 문자로 보정
+
+### v1.0.0
+- 최초 릴리스 (17개 도구)
 
 ## 도구 목록 (17개)
 
@@ -66,10 +79,11 @@ winget install --id Git.Git
 
 ## 설치 및 설정
 
-### 방법 1: uvx 사용 (권장)
+### 방법 1: uvx 사용 (권장) ⭐
 
-별도의 저장소 클론 없이 PyPI에서 자동으로 설치하여 실행합니다.
-uv만 설치되어 있으면 됩니다.
+**가장 쉽고 권장하는 방법입니다.** [PyPI](https://pypi.org/project/scienceon-mcp/)에 배포된 패키지를 사용하므로,
+저장소 클론이나 소스 다운로드 없이 `uvx`가 최신 버전을 자동으로 설치·실행합니다.
+uv만 설치되어 있으면 되고, 새 버전이 나오면 자동으로 반영됩니다.
 
 **Claude Desktop 설정** (`claude_desktop_config.json`):
 
@@ -91,8 +105,9 @@ uv만 설치되어 있으면 됩니다.
 
 ---
 
-### 방법 2: uv로 소스 직접 실행
+### 방법 2: uv로 소스 직접 실행 (개발자용)
 
+소스를 직접 수정하거나 PyPI 미배포 버전을 쓰려는 경우에만 사용합니다.
 저장소를 클론한 후 소스에서 직접 실행합니다.
 
 **저장소 클론** (예: `C:\mcp` 폴더 기준):
@@ -146,6 +161,15 @@ git clone https://github.com/ansua79/scienceon-mcp
 - [FastMCP](https://gofastmcp.com) 2.10+
 - httpx
 - pycryptodome (ScienceON AES 인증)
+
+> 모든 API 요청에는 `User-Agent: scienceon-mcp/<버전>` 헤더가 포함되어, ScienceON 서버 로그에서 이 MCP를 통한 호출을 식별할 수 있습니다.
+
+## 관련 링크
+
+- [ScienceON](https://scienceon.kisti.re.kr) — KISTI 과학기술 지식인프라 서비스
+- [KISTI 한국과학기술정보연구원](https://www.kisti.re.kr) — 본 API를 제공하는 기관
+- [STIMCP Manager](https://github.com/ansua79/stimcp-manager) — MCP 서버를 클릭만으로 설치·관리하는 GUI 도구 (초보자용)
+- [kisti-mcp](https://github.com/ansua79/kisti-mcp) — KISTI 관련 MCP 프로젝트
 
 ## 라이선스
 

@@ -4,10 +4,14 @@ kisti-mcp-ref/
 # Claude 작업 내역
 .claude/
 
+# 로컬 전용 테스트 (저장소에 포함하지 않음)
+tests/
+
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
 .venv/
 venv/
 

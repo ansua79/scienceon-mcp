@@ -11,6 +11,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -21,6 +22,14 @@ from fastmcp import FastMCP
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
+
+try:
+    __version__ = _pkg_version("scienceon-mcp")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
+
+# KISTI 서버 로그에서 이 MCP발 호출을 식별하기 위한 User-Agent
+USER_AGENT = f"scienceon-mcp/{__version__}"
 
 # ─────────────────────────────────────────────
 # 환경변수
@@ -82,7 +91,7 @@ async def _get_token() -> str:
         return _token_cache
 
     url = f"{BASE_URL}/tokenrequest.do?client_id={CLIENT_ID()}&accounts={_make_accounts()}"
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(url)
         data = r.json()
         token = data.get("access_token", "")
@@ -119,7 +128,7 @@ async def _search(target: str, search_query: dict, cur_page: int = 1, row_count:
         f"&action=search&target={target}"
         f"&searchQuery={sq_enc}&curPage={cur_page}&rowCount={row_count}"
     )
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(url)
         return _parse_xml(r.content.decode("utf-8", errors="replace"))
 
@@ -131,7 +140,7 @@ async def _browse(target: str, cn: str) -> dict:
         f"?client_id={CLIENT_ID()}&token={token}&version=1.0"
         f"&action=browse&target={target}&cn={cn}"
     )
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(url)
         return _parse_xml(r.content.decode("utf-8", errors="replace"))
 
@@ -143,7 +152,7 @@ async def _citation(target: str, cn: str) -> dict:
         f"?client_id={CLIENT_ID()}&token={token}&version=1.0"
         f"&action=citation&target={target}&cn={cn}"
     )
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": USER_AGENT}) as client:
         r = await client.get(url)
         return _parse_xml(r.content.decode("utf-8", errors="replace"))
 
@@ -202,9 +211,11 @@ def _clean_html(text: str) -> str:
     text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
     # 2단계: HTML 태그 제거
     text = re.sub(r"<[^>]+>", "", text)
-    # 3단계: 나머지 HTML 엔티티 전체 디코딩 (&nbsp; &lsquo; &rsquo; 등)
+    # 3단계: KISTI/NTIS 응답의 비표준(깨진) 엔티티 보정 (html.unescape로 안 풀리는 것)
+    text = text.replace("&quo;", '"').replace("&apos;", "'")
+    # 4단계: 나머지 HTML 엔티티 전체 디코딩 (&nbsp; &lsquo; &rsquo; 등)
     text = html.unescape(text)
-    # 4단계: 연속 공백 정리
+    # 5단계: 연속 공백 정리
     text = re.sub(r"\s+", " ", text).strip()
     return text
 

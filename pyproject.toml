@@ -1,6 +1,6 @@
 [project]
 name = "scienceon-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "ScienceON-MCP Server - MCP server for KISTI ScienceON OpenAPI"
 readme = "README.md"
 license = "CC-BY-NC-4.0"
