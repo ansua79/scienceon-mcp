@@ -13,7 +13,6 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from typing import Optional
 from urllib.parse import quote
 
 import httpx
@@ -219,9 +218,15 @@ def _clean_html(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-def _truncate(text: str, max_len: int = 300) -> str:
-    text = text.strip()
-    return text[:max_len] + "..." if len(text) > max_len else text
+def _body(text: str, include_body: bool = True) -> str:
+    """긴 본문 텍스트(초록·본문·정의·내용) 정리.
+
+    include_body=False 이면 빈 문자열을 반환해 긴 텍스트를 제외한다
+    (로컬 소형 모델/목록 훑기용). True면 절단 없이 전문을 정리해 반환한다.
+    """
+    if not include_body:
+        return ""
+    return _clean_html(text or "")
 
 def _fmt_date(d: str) -> str:
     """20231101 → 2023-11-01"""
@@ -242,6 +247,7 @@ async def scienceon_papers(
     query: str,
     max_results: int = 10,
     page: int = 1,
+    include_body: bool = True,
 ) -> str:
     """
     KISTI ScienceON에서 논문을 검색합니다.
@@ -250,9 +256,11 @@ async def scienceon_papers(
         query: 검색 키워드
         max_results: 최대 결과 수 (기본 10, 최대 100)
         page: 페이지 번호 (기본 1)
+        include_body: 초록 등 긴 본문 포함 여부 (기본 True). False면 초록을 제외하고
+                      서지정보·DOI·키워드·링크만 반환합니다 (목록 훑기용).
 
     Returns:
-        논문 목록 (제목, 저자, 발행년, 저널명, 초록, CN번호)
+        논문 목록 (제목, 저자, 소속, 발행년, 저널, 발행기관, 페이지, ISSN, DOI, 키워드, 초록, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -266,19 +274,23 @@ async def scienceon_papers(
 
         lines = [f"**논문 검색 결과** | 검색어: '{query}' | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title   = r.get("Title", "제목 없음")
-            author  = r.get("Author", "")
-            year    = r.get("Pubyear", "")
-            journal = r.get("JournalName", "")
-            cn      = r.get("CN", "")
-            abstract = _truncate(_clean_html(r.get("Abstract", "")), 200)
-
-            lines.append(f"**[{i}] {title}**")
-            if author: lines.append(f"  - 저자: {author}")
-            if year:   lines.append(f"  - 발행년: {year}")
-            if journal: lines.append(f"  - 저널: {journal}")
-            if cn:     lines.append(f"  - CN: `{cn}`")
-            if abstract: lines.append(f"  - 초록: {abstract}")
+            lines.append(f"**[{i}] {r.get('Title', '제목 없음')}**")
+            if r.get("Author"):      lines.append(f"  - 저자: {r['Author']}")
+            if r.get("Affiliation"): lines.append(f"  - 소속: {r['Affiliation']}")
+            if r.get("Pubyear"):     lines.append(f"  - 발행년: {r['Pubyear']}")
+            if r.get("JournalName"): lines.append(f"  - 저널: {r['JournalName']}")
+            if r.get("Publisher"):   lines.append(f"  - 발행기관: {r['Publisher']}")
+            if r.get("PageInfo"):    lines.append(f"  - 페이지: {r['PageInfo']}")
+            if r.get("ISSN"):        lines.append(f"  - ISSN: {r['ISSN']}")
+            if r.get("DBCode"):      lines.append(f"  - DB구분: {r['DBCode']}")
+            if r.get("Degree"):      lines.append(f"  - 학위구분: {r['Degree']}")
+            if r.get("CN"):          lines.append(f"  - CN: `{r['CN']}`")
+            if r.get("DOI"):         lines.append(f"  - DOI: {r['DOI']}")
+            if r.get("Keyword"):     lines.append(f"  - 키워드: {_clean_html(r['Keyword'])}")
+            abstract = _body(r.get("Abstract", ""), include_body)
+            if abstract:             lines.append(f"  - 초록: {abstract}")
+            if r.get("FulltextURL"): lines.append(f"  - 원문: {r['FulltextURL']}")
+            if r.get("ContentURL"):  lines.append(f"  - ScienceON: {r['ContentURL']}")
             lines.append("")
 
         lines.append("💡 상세정보는 CN번호로 `scienceon_paper_details`를 호출하세요.")
@@ -288,15 +300,16 @@ async def scienceon_papers(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def scienceon_paper_details(cn: str) -> str:
+async def scienceon_paper_details(cn: str, include_body: bool = True) -> str:
     """
-    CN번호로 논문 상세정보를 조회합니다. (인용/참고문헌, 유사논문 포함)
+    CN번호로 논문 상세정보를 조회합니다.
 
     Args:
         cn: 논문 고유 식별번호 (논문 검색 결과의 CN 값)
+        include_body: 초록 등 긴 본문 포함 여부 (기본 True). False면 초록을 제외합니다.
 
     Returns:
-        논문 상세정보
+        논문 상세정보 (서지정보, DOI, 키워드, 초록, 원문 링크)
     """
     if err := _check_credentials():
         return err
@@ -310,26 +323,25 @@ async def scienceon_paper_details(cn: str) -> str:
         r = result["records"][0]
         lines = [f"**논문 상세정보** | CN: `{cn}`\n"]
         lines.append(f"**제목**: {r.get('Title', '')}")
-        if r.get("Author"):     lines.append(f"**저자**: {r['Author']}")
-        if r.get("Pubyear"):    lines.append(f"**발행년**: {r['Pubyear']}")
+        if r.get("Author"):      lines.append(f"**저자**: {r['Author']}")
+        if r.get("Affiliation"): lines.append(f"**소속**: {r['Affiliation']}")
+        if r.get("Pubyear"):     lines.append(f"**발행년**: {r['Pubyear']}")
         if r.get("JournalName"): lines.append(f"**저널**: {r['JournalName']}")
-        if r.get("Publisher"):  lines.append(f"**출판사**: {r['Publisher']}")
-        if r.get("DOI"):        lines.append(f"**DOI**: {r['DOI']}")
-        if r.get("Keyword"):    lines.append(f"**키워드**: {r['Keyword']}")
+        if r.get("Publisher"):   lines.append(f"**발행기관**: {r['Publisher']}")
+        if r.get("PageInfo"):    lines.append(f"**페이지**: {r['PageInfo']}")
+        if r.get("ISSN"):        lines.append(f"**ISSN**: {r['ISSN']}")
+        if r.get("DBCode"):      lines.append(f"**DB구분**: {r['DBCode']}")
+        if r.get("Degree"):      lines.append(f"**학위구분**: {r['Degree']}")
+        if r.get("DOI"):         lines.append(f"**DOI**: {r['DOI']}")
+        if r.get("Keyword"):     lines.append(f"**키워드**: {_clean_html(r['Keyword'])}")
         lines.append(f"**ScienceON**: https://scienceon.kisti.re.kr/srch/selectPORSrchArticle.do?cn={cn}")
 
-        abstract = _clean_html(r.get("Abstract", ""))
+        abstract = _body(r.get("Abstract", ""), include_body)
         if abstract:
             lines.append(f"\n**초록**:\n{abstract}")
 
-        if r.get("FulltextURL"):
-            lines.append(f"\n**원문**: {r['FulltextURL']}")
-        if r.get("SimilarTitle"):
-            lines.append(f"\n**유사논문**: {_truncate(r['SimilarTitle'], 200)}")
-        if r.get("CitingTitle"):
-            lines.append(f"\n**인용논문**: {_truncate(r['CitingTitle'], 200)}")
-        if r.get("CitedTitle"):
-            lines.append(f"\n**참고논문**: {_truncate(r['CitedTitle'], 200)}")
+        if r.get("FulltextURL"): lines.append(f"\n**원문**: {r['FulltextURL']}")
+        if r.get("ContentURL"):  lines.append(f"**콘텐츠 URL**: {r['ContentURL']}")
 
         return "\n".join(lines)
     except Exception as e:
@@ -343,17 +355,20 @@ async def scienceon_patents(
     query: str,
     max_results: int = 10,
     page: int = 1,
+    include_body: bool = True,
 ) -> str:
     """
     KISTI ScienceON에서 특허를 검색합니다.
+    인용/피인용 특허는 별도 도구 `scienceon_patent_citations`로 조회합니다.
 
     Args:
         query: 검색 키워드
         max_results: 최대 결과 수 (기본 10, 최대 100)
         page: 페이지 번호 (기본 1)
+        include_body: 초록 등 긴 본문 포함 여부 (기본 True). False면 초록을 제외합니다.
 
     Returns:
-        특허 목록 (특허제목, 출원인, 출원일, 공개일, 특허상태, CN번호)
+        특허 목록 (제목, 출원인, 출원일/번호, 공개일/번호, 등록일/번호, 상태, IPC, 국가, 초록, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -367,23 +382,22 @@ async def scienceon_patents(
 
         lines = [f"**특허 검색 결과** | 검색어: '{query}' | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title      = r.get("Title", "제목 없음")
-            applicants = r.get("Applicants", "")
-            appl_date  = _fmt_date(r.get("ApplDate", ""))
-            publ_date  = _fmt_date(r.get("PublDate", ""))
-            status     = r.get("PatentStatus", "")
-            ipc        = r.get("IPC", "")
-            cn         = r.get("CN", "")
-            abstract   = _truncate(_clean_html(r.get("Abstract", "")), 200)
-
-            lines.append(f"**[{i}] {title}**")
-            if applicants: lines.append(f"  - 출원인: {applicants}")
-            if appl_date:  lines.append(f"  - 출원일: {appl_date}")
-            if publ_date:  lines.append(f"  - 공개일: {publ_date}")
-            if status:     lines.append(f"  - 상태: {status}")
-            if ipc:        lines.append(f"  - IPC: {ipc}")
-            if cn:         lines.append(f"  - CN: `{cn}`")
-            if abstract:   lines.append(f"  - 초록: {abstract}")
+            lines.append(f"**[{i}] {r.get('Title', '제목 없음')}**")
+            if r.get("Applicants"):   lines.append(f"  - 출원인: {r['Applicants']}")
+            if r.get("ApplDate"):     lines.append(f"  - 출원일: {_fmt_date(r['ApplDate'])}")
+            if r.get("ApplNum"):      lines.append(f"  - 출원번호: {r['ApplNum']}")
+            if r.get("PublDate"):     lines.append(f"  - 공개일: {_fmt_date(r['PublDate'])}")
+            if r.get("PublNum"):      lines.append(f"  - 공개번호: {r['PublNum']}")
+            if r.get("GrantDate"):    lines.append(f"  - 등록일: {_fmt_date(r['GrantDate'])}")
+            if r.get("GrantNum"):     lines.append(f"  - 등록번호: {r['GrantNum']}")
+            if r.get("NoticeDate"):   lines.append(f"  - 공고일: {_fmt_date(r['NoticeDate'])}")
+            if r.get("PatentStatus"): lines.append(f"  - 상태: {r['PatentStatus']}")
+            if r.get("IPC"):          lines.append(f"  - IPC: {r['IPC']}")
+            if r.get("Nation"):       lines.append(f"  - 국가: {r['Nation']}")
+            if r.get("CN"):           lines.append(f"  - CN: `{r['CN']}`")
+            abstract = _body(r.get("Abstract", ""), include_body)
+            if abstract:              lines.append(f"  - 초록: {abstract}")
+            if r.get("ContentURL"):   lines.append(f"  - ScienceON: {r['ContentURL']}")
             lines.append("")
 
         lines.append("💡 상세정보는 CN번호로 `scienceon_patent_details`를, 인용정보는 `scienceon_patent_citations`를 호출하세요.")
@@ -393,15 +407,17 @@ async def scienceon_patents(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def scienceon_patent_details(cn: str) -> str:
+async def scienceon_patent_details(cn: str, include_body: bool = True) -> str:
     """
     CN번호로 특허 상세정보를 조회합니다.
+    인용/피인용 특허는 별도 도구 `scienceon_patent_citations`로 조회합니다.
 
     Args:
         cn: 특허 고유 식별번호 (특허 검색 결과의 CN 값)
+        include_body: 초록 등 긴 본문 포함 여부 (기본 True). False면 초록을 제외합니다.
 
     Returns:
-        특허 상세정보 (유사특허, 인용특허 포함)
+        특허 상세정보 (출원/공개/등록 정보, 상태, IPC, 국가, 초록)
     """
     if err := _check_credentials():
         return err
@@ -416,25 +432,26 @@ async def scienceon_patent_details(cn: str) -> str:
         lines = [f"**특허 상세정보** | CN: `{cn}`\n"]
         lines.append(f"**제목**: {r.get('Title', '')}")
         if r.get("Applicants"):   lines.append(f"**출원인**: {r['Applicants']}")
-        if r.get("Inventor"):     lines.append(f"**발명자**: {r['Inventor']}")
         if r.get("ApplDate"):     lines.append(f"**출원일**: {_fmt_date(r['ApplDate'])}")
+        if r.get("ApplNum"):      lines.append(f"**출원번호**: {r['ApplNum']}")
         if r.get("PublDate"):     lines.append(f"**공개일**: {_fmt_date(r['PublDate'])}")
+        if r.get("PublNum"):      lines.append(f"**공개번호**: {r['PublNum']}")
         if r.get("GrantDate"):    lines.append(f"**등록일**: {_fmt_date(r['GrantDate'])}")
         if r.get("GrantNum"):     lines.append(f"**등록번호**: {r['GrantNum']}")
+        if r.get("NoticeDate"):   lines.append(f"**공고일**: {_fmt_date(r['NoticeDate'])}")
         if r.get("PatentStatus"): lines.append(f"**상태**: {r['PatentStatus']}")
         if r.get("IPC"):          lines.append(f"**IPC**: {r['IPC']}")
         if r.get("Nation"):       lines.append(f"**국가**: {r['Nation']}")
         lines.append(f"**ScienceON**: https://scienceon.kisti.re.kr/srch/selectPORSrchPatent.do?cn={cn}")
 
-        abstract = _clean_html(r.get("Abstract", ""))
+        abstract = _body(r.get("Abstract", ""), include_body)
         if abstract:
             lines.append(f"\n**초록**:\n{abstract}")
 
-        if r.get("SimilarTitle"):
-            lines.append(f"\n**유사특허**: {_truncate(r['SimilarTitle'], 200)}")
-        if r.get("CitingTitle"):
-            lines.append(f"\n**인용특허**: {_truncate(r['CitingTitle'], 200)}")
+        if r.get("ContentURL"):
+            lines.append(f"\n**콘텐츠 URL**: {r['ContentURL']}")
 
+        lines.append("\n💡 이 특허의 인용/피인용 특허는 `scienceon_patent_citations`로 확인하세요.")
         return "\n".join(lines)
     except Exception as e:
         return f"특허 상세조회 중 오류: {e}"
@@ -449,7 +466,7 @@ async def scienceon_patent_citations(cn: str) -> str:
         cn: 특허 고유 식별번호 (특허 검색 결과의 CN 값)
 
     Returns:
-        인용/피인용 특허 목록
+        인용/피인용 특허 목록 (인용구분, 제목, 출원인, 출원일, 발명자, 상태, IPC, 국가, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -464,17 +481,17 @@ async def scienceon_patent_citations(cn: str) -> str:
         lines = [f"**특허 인용/피인용 정보** | CN: `{cn}` | 총 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
             citation_type = r.get("Citation", "")
-            title         = r.get("Title", "제목 없음")
-            applicants    = r.get("Applicants", "")
-            appl_date     = _fmt_date(r.get("ApplDate", ""))
-            status        = r.get("PatentStatus", "")
-            ref_cn        = r.get("CN", "")
-
-            lines.append(f"**[{i}] [{citation_type}] {title}**")
-            if applicants: lines.append(f"  - 출원인: {applicants}")
-            if appl_date:  lines.append(f"  - 출원일: {appl_date}")
-            if status:     lines.append(f"  - 상태: {status}")
-            if ref_cn:     lines.append(f"  - CN: `{ref_cn}`")
+            header = f"**[{i}] {r.get('Title', '제목 없음')}**"
+            if citation_type:
+                header += f"  [{citation_type}]"
+            lines.append(header)
+            if r.get("Applicants"):   lines.append(f"  - 출원인: {r['Applicants']}")
+            if r.get("ApplDate"):     lines.append(f"  - 출원일: {_fmt_date(r['ApplDate'])}")
+            if r.get("Inventor"):     lines.append(f"  - 발명자: {r['Inventor']}")
+            if r.get("PatentStatus"): lines.append(f"  - 상태: {r['PatentStatus']}")
+            if r.get("IPC"):          lines.append(f"  - IPC: {r['IPC']}")
+            if r.get("NationCode"):   lines.append(f"  - 국가: {r['NationCode']}")
+            if r.get("CN"):           lines.append(f"  - CN: `{r['CN']}`")
             lines.append("")
 
         return "\n".join(lines)
@@ -489,6 +506,7 @@ async def scienceon_reports(
     query: str,
     max_results: int = 10,
     page: int = 1,
+    include_body: bool = True,
 ) -> str:
     """
     KISTI ScienceON에서 R&D 보고서를 검색합니다.
@@ -497,9 +515,10 @@ async def scienceon_reports(
         query: 검색 키워드
         max_results: 최대 결과 수 (기본 10, 최대 100)
         page: 페이지 번호 (기본 1)
+        include_body: 초록 등 긴 본문 포함 여부 (기본 True). False면 초록을 제외합니다.
 
     Returns:
-        보고서 목록 (제목, 저자, 발행기관, 발행년, 초록, CN번호)
+        보고서 목록 (제목, 저자, 발행년, 발행/주관/연구관리/공동/협력기관, 기여자, 페이지, 키워드, 초록, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -513,19 +532,23 @@ async def scienceon_reports(
 
         lines = [f"**보고서 검색 결과** | 검색어: '{query}' | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title     = r.get("Title", "제목 없음")
-            author    = r.get("Author", "")
-            publisher = r.get("Publisher", "")
-            year      = r.get("Pubyear", "")
-            cn        = r.get("CN", "")
-            abstract  = _truncate(_clean_html(r.get("Abstract", "")), 200)
-
-            lines.append(f"**[{i}] {title}**")
-            if author:    lines.append(f"  - 저자: {author}")
-            if publisher: lines.append(f"  - 발행기관: {publisher}")
-            if year:      lines.append(f"  - 발행년: {year}")
-            if cn:        lines.append(f"  - CN: `{cn}`")
-            if abstract:  lines.append(f"  - 초록: {abstract}")
+            lines.append(f"**[{i}] {r.get('Title', '제목 없음')}**")
+            if r.get("Author"):            lines.append(f"  - 저자: {r['Author']}")
+            if r.get("Pubyear"):           lines.append(f"  - 발행년: {r['Pubyear']}")
+            if r.get("Publisher"):         lines.append(f"  - 발행기관: {r['Publisher']}")
+            if r.get("ManagingAgency"):    lines.append(f"  - 주관기관: {r['ManagingAgency']}")
+            if r.get("ResearchMngAgency"): lines.append(f"  - 연구관리기관: {r['ResearchMngAgency']}")
+            if r.get("CoResearchOrg"):     lines.append(f"  - 공동연구기관: {r['CoResearchOrg']}")
+            if r.get("CollaboratingOrg"):  lines.append(f"  - 협력기관: {r['CollaboratingOrg']}")
+            if r.get("Contributors"):      lines.append(f"  - 기여자: {r['Contributors']}")
+            if r.get("PageInfo"):          lines.append(f"  - 페이지: {r['PageInfo']}")
+            if r.get("STCMajorCode"):      lines.append(f"  - 과학기술표준분류: {r['STCMajorCode']}")
+            if r.get("CN"):                lines.append(f"  - CN: `{r['CN']}`")
+            if r.get("Keyword"):           lines.append(f"  - 키워드: {_clean_html(r['Keyword'])}")
+            abstract = _body(r.get("Abstract", ""), include_body)
+            if abstract:                   lines.append(f"  - 초록: {abstract}")
+            if r.get("FulltextURL"):       lines.append(f"  - 원문: {r['FulltextURL']}")
+            if r.get("ContentURL"):        lines.append(f"  - ScienceON: {r['ContentURL']}")
             lines.append("")
 
         lines.append("💡 상세정보는 CN번호로 `scienceon_report_details`를 호출하세요.")
@@ -535,15 +558,16 @@ async def scienceon_reports(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def scienceon_report_details(cn: str) -> str:
+async def scienceon_report_details(cn: str, include_body: bool = True) -> str:
     """
     CN번호로 R&D 보고서 상세정보를 조회합니다.
 
     Args:
         cn: 보고서 고유 식별번호 (보고서 검색 결과의 CN 값)
+        include_body: 초록 등 긴 본문 포함 여부 (기본 True). False면 초록을 제외합니다.
 
     Returns:
-        보고서 상세정보 (인용논문/특허/보고서 포함)
+        보고서 상세정보 (수행기관 정보, 기여자, 페이지, 키워드, 초록, 원문 링크)
     """
     if err := _check_credentials():
         return err
@@ -557,25 +581,25 @@ async def scienceon_report_details(cn: str) -> str:
         r = result["records"][0]
         lines = [f"**보고서 상세정보** | CN: `{cn}`\n"]
         lines.append(f"**제목**: {r.get('Title', '')}")
-        if r.get("Title2"):    lines.append(f"**부제목**: {r['Title2']}")
-        if r.get("Author"):    lines.append(f"**저자**: {r['Author']}")
-        if r.get("Publisher"): lines.append(f"**발행기관**: {r['Publisher']}")
-        if r.get("Pubyear"):   lines.append(f"**발행년**: {r['Pubyear']}")
-        if r.get("Keyword"):   lines.append(f"**키워드**: {r['Keyword']}")
+        if r.get("Author"):            lines.append(f"**저자**: {r['Author']}")
+        if r.get("Pubyear"):           lines.append(f"**발행년**: {r['Pubyear']}")
+        if r.get("Publisher"):         lines.append(f"**발행기관**: {r['Publisher']}")
+        if r.get("ManagingAgency"):    lines.append(f"**주관기관**: {r['ManagingAgency']}")
+        if r.get("ResearchMngAgency"): lines.append(f"**연구관리기관**: {r['ResearchMngAgency']}")
+        if r.get("CoResearchOrg"):     lines.append(f"**공동연구기관**: {r['CoResearchOrg']}")
+        if r.get("CollaboratingOrg"):  lines.append(f"**협력기관**: {r['CollaboratingOrg']}")
+        if r.get("Contributors"):      lines.append(f"**기여자**: {r['Contributors']}")
+        if r.get("PageInfo"):          lines.append(f"**페이지**: {r['PageInfo']}")
+        if r.get("STCMajorCode"):      lines.append(f"**과학기술표준분류**: {r['STCMajorCode']}")
+        if r.get("Keyword"):           lines.append(f"**키워드**: {_clean_html(r['Keyword'])}")
         lines.append(f"**ScienceON**: https://scienceon.kisti.re.kr/srch/selectPORSrchReport.do?cn={cn}")
 
-        abstract = _clean_html(r.get("Abstract", ""))
+        abstract = _body(r.get("Abstract", ""), include_body)
         if abstract:
             lines.append(f"\n**초록**:\n{abstract}")
 
-        if r.get("FulltextURL"):
-            lines.append(f"\n**원문**: {r['FulltextURL']}")
-        if r.get("CitedPaperinfo"):
-            lines.append(f"\n**인용논문**: {_truncate(r['CitedPaperinfo'], 200)}")
-        if r.get("CitedPatentinfo"):
-            lines.append(f"\n**인용특허**: {_truncate(r['CitedPatentinfo'], 200)}")
-        if r.get("CitedReportinfo"):
-            lines.append(f"\n**인용보고서**: {_truncate(r['CitedReportinfo'], 200)}")
+        if r.get("FulltextURL"): lines.append(f"\n**원문**: {r['FulltextURL']}")
+        if r.get("ContentURL"):  lines.append(f"**콘텐츠 URL**: {r['ContentURL']}")
 
         return "\n".join(lines)
     except Exception as e:
@@ -589,6 +613,7 @@ async def scienceon_news_trends(
     query: str,
     max_results: int = 10,
     page: int = 1,
+    include_body: bool = True,
 ) -> str:
     """
     KISTI ScienceON에서 과학기술 동향 기사를 검색합니다.
@@ -598,9 +623,10 @@ async def scienceon_news_trends(
         query: 검색 키워드
         max_results: 최대 결과 수 (기본 10, 최대 100)
         page: 페이지 번호 (기본 1)
+        include_body: 내용 등 긴 본문 포함 여부 (기본 True). False면 내용을 제외합니다.
 
     Returns:
-        동향 기사 목록 (제목, 발행년, 초록, CN번호)
+        동향 기사 목록 (제목, 저자, 발행기관, 발행년, 등록일, 주제, 키워드, 내용, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -614,15 +640,19 @@ async def scienceon_news_trends(
 
         lines = [f"**과학기술 동향 검색 결과** | 검색어: '{query}' | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title    = r.get("Title", "제목 없음")
-            year     = r.get("Pubyear", "")
-            cn       = r.get("CN", "")
-            abstract = _truncate(_clean_html(r.get("Abstract", "")), 200)
-
-            lines.append(f"**[{i}] {title}**")
-            if year: lines.append(f"  - 발행년: {year}")
-            if cn:   lines.append(f"  - CN: `{cn}`")
-            if abstract: lines.append(f"  - 내용: {abstract}")
+            lines.append(f"**[{i}] {r.get('Title', '제목 없음')}**")
+            if r.get("Author"):    lines.append(f"  - 저자: {r['Author']}")
+            if r.get("Publisher"): lines.append(f"  - 발행기관: {r['Publisher']}")
+            if r.get("Pubyear"):   lines.append(f"  - 발행년: {r['Pubyear']}")
+            if r.get("RegDate"):   lines.append(f"  - 등록일: {r['RegDate']}")
+            if r.get("Subject"):   lines.append(f"  - 주제: {r['Subject']}")
+            if r.get("DBCode"):    lines.append(f"  - DB구분: {r['DBCode']}")
+            if r.get("Keyword"):   lines.append(f"  - 키워드: {_clean_html(r['Keyword'])}")
+            if r.get("CN"):        lines.append(f"  - CN: `{r['CN']}`")
+            abstract = _body(r.get("Abstract", ""), include_body)
+            if abstract:           lines.append(f"  - 내용: {abstract}")
+            if r.get("FulltextURL"): lines.append(f"  - 원문: {r['FulltextURL']}")
+            if r.get("ContentURL"):  lines.append(f"  - ScienceON: {r['ContentURL']}")
             lines.append("")
 
         lines.append("💡 상세정보는 CN번호로 `scienceon_news_trend_details`를 호출하세요.")
@@ -632,15 +662,16 @@ async def scienceon_news_trends(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def scienceon_news_trend_details(cn: str) -> str:
+async def scienceon_news_trend_details(cn: str, include_body: bool = True) -> str:
     """
     CN번호로 과학기술 동향 기사 상세정보를 조회합니다.
 
     Args:
         cn: 동향 기사 고유 식별번호 (동향 검색 결과의 CN 값)
+        include_body: 내용 등 긴 본문 포함 여부 (기본 True). False면 내용을 제외합니다.
 
     Returns:
-        동향 기사 상세정보
+        동향 기사 상세정보 (저자, 발행기관, 발행년, 등록일, 주제, 키워드, 내용, 원문 링크)
     """
     if err := _check_credentials():
         return err
@@ -654,16 +685,20 @@ async def scienceon_news_trend_details(cn: str) -> str:
         r = result["records"][0]
         lines = [f"**동향 기사 상세정보** | CN: `{cn}`\n"]
         lines.append(f"**제목**: {r.get('Title', '')}")
-        if r.get("Pubyear"):  lines.append(f"**발행년**: {r['Pubyear']}")
+        if r.get("Author"):    lines.append(f"**저자**: {r['Author']}")
+        if r.get("Pubyear"):   lines.append(f"**발행년**: {r['Pubyear']}")
+        if r.get("RegDate"):   lines.append(f"**등록일**: {r['RegDate']}")
         if r.get("Publisher"): lines.append(f"**발행기관**: {r['Publisher']}")
-        if r.get("DBCode"):   lines.append(f"**DB**: {r['DBCode']}")
+        if r.get("Subject"):   lines.append(f"**주제**: {r['Subject']}")
+        if r.get("DBCode"):    lines.append(f"**DB**: {r['DBCode']}")
+        if r.get("Keyword"):   lines.append(f"**키워드**: {_clean_html(r['Keyword'])}")
 
-        abstract = _clean_html(r.get("Abstract", ""))
+        abstract = _body(r.get("Abstract", ""), include_body)
         if abstract:
             lines.append(f"\n**내용**:\n{abstract}")
 
-        if r.get("FulltextURL"):
-            lines.append(f"\n**원문**: {r['FulltextURL']}")
+        if r.get("FulltextURL"): lines.append(f"\n**원문**: {r['FulltextURL']}")
+        if r.get("ContentURL"):  lines.append(f"**ScienceON**: {r['ContentURL']}")
 
         return "\n".join(lines)
     except Exception as e:
@@ -677,6 +712,7 @@ async def scienceon_scents(
     year: str,
     max_results: int = 10,
     page: int = 1,
+    include_body: bool = True,
 ) -> str:
     """
     KISTI ScienceON에서 과학향기 칼럼을 검색합니다.
@@ -687,9 +723,10 @@ async def scienceon_scents(
         year: 발행연도 (예: "2024")
         max_results: 최대 결과 수 (기본 10, 최대 100)
         page: 페이지 번호 (기본 1)
+        include_body: 본문 등 긴 텍스트 포함 여부 (기본 True). False면 본문을 제외합니다.
 
     Returns:
-        과학향기 칼럼 목록 (제목, 권호, CN번호)
+        과학향기 칼럼 목록 (제목, 권호, 분류, 세부분류, 등록일, 본문, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -703,13 +740,15 @@ async def scienceon_scents(
 
         lines = [f"**과학향기 칼럼 목록** | {year}년 | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title  = r.get("ScentTitle", "제목 없음")
-            volume = r.get("Volume", "")
-            cn     = r.get("CN", "")
-
-            lines.append(f"**[{i}] {title}**")
-            if volume: lines.append(f"  - 권호: {volume}")
-            if cn:     lines.append(f"  - CN: `{cn}`")
+            lines.append(f"**[{i}] {r.get('ScentTitle', '제목 없음')}**")
+            if r.get("Volume"):       lines.append(f"  - 권호: {r['Volume']}")
+            if r.get("Class"):        lines.append(f"  - 분류: {r['Class']}")
+            if r.get("Subclass"):     lines.append(f"  - 세부분류: {r['Subclass']}")
+            if r.get("RegisterDate"): lines.append(f"  - 등록일: {r['RegisterDate']}")
+            if r.get("CN"):           lines.append(f"  - CN: `{r['CN']}`")
+            content = _body(r.get("Content", ""), include_body)
+            if content:               lines.append(f"  - 본문: {content}")
+            if r.get("ContentURL"):   lines.append(f"  - ScienceON: {r['ContentURL']}")
             lines.append("")
 
         lines.append("💡 본문은 CN번호로 `scienceon_scent_details`를 호출하세요.")
@@ -719,15 +758,16 @@ async def scienceon_scents(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def scienceon_scent_details(cn: str) -> str:
+async def scienceon_scent_details(cn: str, include_body: bool = True) -> str:
     """
     CN번호로 과학향기 칼럼 상세정보 및 본문을 조회합니다.
 
     Args:
         cn: 과학향기 고유 식별번호 (과학향기 검색 결과의 CN 값)
+        include_body: 본문 포함 여부 (기본 True). False면 본문을 제외하고 메타정보만 반환합니다.
 
     Returns:
-        과학향기 칼럼 상세정보 및 본문
+        과학향기 칼럼 상세정보 (제목, 권호, 분류, 세부분류, 등록일, 본문)
     """
     if err := _check_credentials():
         return err
@@ -741,11 +781,16 @@ async def scienceon_scent_details(cn: str) -> str:
         r = result["records"][0]
         lines = [f"**과학향기 칼럼** | CN: `{cn}`\n"]
         lines.append(f"**제목**: {r.get('ScentTitle', '')}")
-        if r.get("Volume"): lines.append(f"**권호**: {r['Volume']}")
+        if r.get("Volume"):       lines.append(f"**권호**: {r['Volume']}")
+        if r.get("Class"):        lines.append(f"**분류**: {r['Class']}")
+        if r.get("Subclass"):     lines.append(f"**세부분류**: {r['Subclass']}")
+        if r.get("RegisterDate"): lines.append(f"**등록일**: {r['RegisterDate']}")
 
-        content = _clean_html(r.get("Content", ""))
+        content = _body(r.get("Content", ""), include_body)
         if content:
             lines.append(f"\n**본문**:\n{content}")
+
+        if r.get("ContentURL"): lines.append(f"\n**ScienceON**: {r['ContentURL']}")
 
         return "\n".join(lines)
     except Exception as e:
@@ -769,7 +814,7 @@ async def scienceon_researchers(
         page: 페이지 번호 (기본 1)
 
     Returns:
-        연구자 목록 (이름, 소속기관, 논문/특허/보고서 건수, CN번호)
+        연구자 목록 (이름, 영문명, 소속(국/영문), 이메일, 키워드, 논문/특허/보고서 건수, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -783,22 +828,18 @@ async def scienceon_researchers(
 
         lines = [f"**연구자 검색 결과** | 검색어: '{query}' | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            name_kor  = r.get("AuthorNameKor", "")
-            name_eng  = r.get("AuthorNameEng", "")
-            inst_kor  = r.get("AuthorInstKor", "")
-            email     = r.get("Email", "")
-            art_cnt   = r.get("ArticleCnt", "0")
-            pat_cnt   = r.get("PatentCnt", "0")
-            rpt_cnt   = r.get("ReportCnt", "0")
-            cn        = r.get("CN", "")
+            name_kor = r.get("AuthorNameKor", "")
+            name_eng = r.get("AuthorNameEng", "")
 
             name = name_kor or name_eng or "이름 없음"
             lines.append(f"**[{i}] {name}**")
-            if name_eng and name_kor: lines.append(f"  - 영문명: {name_eng}")
-            if inst_kor:  lines.append(f"  - 소속: {inst_kor}")
-            if email:     lines.append(f"  - 이메일: {email}")
-            lines.append(f"  - 실적: 논문 {art_cnt}건 / 특허 {pat_cnt}건 / 보고서 {rpt_cnt}건")
-            if cn: lines.append(f"  - CN: `{cn}`")
+            if name_eng and name_kor:  lines.append(f"  - 영문명: {name_eng}")
+            if r.get("AuthorInstKor"): lines.append(f"  - 소속: {r['AuthorInstKor']}")
+            if r.get("AuthorInstEng"): lines.append(f"  - 소속(영문): {r['AuthorInstEng']}")
+            if r.get("Email"):         lines.append(f"  - 이메일: {r['Email']}")
+            if r.get("Keyword"):       lines.append(f"  - 키워드: {_clean_html(r['Keyword'])}")
+            lines.append(f"  - 실적: 논문 {r.get('ArticleCnt','0')}건 / 특허 {r.get('PatentCnt','0')}건 / 보고서 {r.get('ReportCnt','0')}건")
+            if r.get("CN"): lines.append(f"  - CN: `{r['CN']}`")
             lines.append("")
 
         lines.append("💡 상세정보는 CN번호로 `scienceon_researcher_details`를 호출하세요.")
@@ -860,7 +901,7 @@ async def scienceon_organizations(
         page: 페이지 번호 (기본 1)
 
     Returns:
-        연구기관 목록 (기관명, 키워드, CN번호)
+        연구기관 목록 (기관명(국/영문), 키워드, 논문/특허/보고서 건수, CN번호)
     """
     if err := _check_credentials():
         return err
@@ -876,14 +917,13 @@ async def scienceon_organizations(
         for i, r in enumerate(records, 1):
             name_kor = r.get("OrganKor", "")
             name_eng = r.get("OrganEng", "")
-            keyword  = r.get("Keyword", "")
-            cn       = r.get("CN", "")
 
             name = name_kor or name_eng or "기관명 없음"
             lines.append(f"**[{i}] {name}**")
             if name_eng and name_kor: lines.append(f"  - 영문명: {name_eng}")
-            if keyword: lines.append(f"  - 키워드: {_truncate(keyword, 100)}")
-            if cn: lines.append(f"  - CN: `{cn}`")
+            if r.get("Keyword"):      lines.append(f"  - 키워드: {_clean_html(r['Keyword'])}")
+            lines.append(f"  - 실적: 논문 {r.get('ArticleCnt','0')}건 / 특허 {r.get('PatentCnt','0')}건 / 보고서 {r.get('ReportCnt','0')}건")
+            if r.get("CN"): lines.append(f"  - CN: `{r['CN']}`")
             lines.append("")
 
         lines.append("💡 상세정보는 CN번호로 `scienceon_organization_details`를 호출하세요.")
@@ -916,7 +956,8 @@ async def scienceon_organization_details(cn: str) -> str:
         lines = [f"**연구기관 상세정보** | CN: `{cn}`\n"]
         if r.get("OrganKor"): lines.append(f"**기관명(국문)**: {r['OrganKor']}")
         if r.get("OrganEng"): lines.append(f"**기관명(영문)**: {r['OrganEng']}")
-        if r.get("Keyword"):  lines.append(f"**키워드**: {r['Keyword']}")
+        if r.get("Keyword"):  lines.append(f"**키워드**: {_clean_html(r['Keyword'])}")
+        lines.append(f"**실적**: 논문 {r.get('ArticleCnt','0')}건 / 특허 {r.get('PatentCnt','0')}건 / 보고서 {r.get('ReportCnt','0')}건")
 
         return "\n".join(lines)
     except Exception as e:
@@ -930,6 +971,7 @@ async def scienceon_tech_trends(
     query: str,
     max_results: int = 10,
     page: int = 1,
+    include_body: bool = True,
 ) -> str:
     """
     KISTI ScienceON에서 기술트렌드 토픽을 검색합니다.
@@ -940,9 +982,10 @@ async def scienceon_tech_trends(
         query: 검색 키워드
         max_results: 최대 결과 수 (기본 10, 최대 100)
         page: 페이지 번호 (기본 1)
+        include_body: 정의 등 긴 텍스트 포함 여부 (기본 True). False면 정의를 제외합니다.
 
     Returns:
-        기술트렌드 토픽 목록 (트렌드명, 연관키워드, 정의, ContentURL, PdfURL)
+        기술트렌드 토픽 목록 (트렌드명, 생성일, 연관키워드, 정의, 정의출처, CN, 상세/PDF/썸네일 URL)
     """
     if err := _check_credentials():
         return err
@@ -956,21 +999,17 @@ async def scienceon_tech_trends(
 
         lines = [f"**기술트렌드 검색 결과** | 검색어: '{query}' | 총 {result['total_count']:,}건 중 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title    = r.get("Title", "제목 없음")
-            keywords = r.get("RelatedKeywords", "")
-            definition = _truncate(_clean_html(r.get("Definition", "")), 200)
+            lines.append(f"**[{i}] {r.get('Title', '제목 없음')}**")
             pub_date = _fmt_date(r.get("PublDate", ""))
-            cn       = r.get("CN", "")
-            content_url = r.get("ContentURL", "")
-            pdf_url  = r.get("PdfURL", "")
-
-            lines.append(f"**[{i}] {title}**")
-            if pub_date:  lines.append(f"  - 생성일: {pub_date}")
-            if keywords:  lines.append(f"  - 연관키워드: {_truncate(keywords, 150)}")
-            if definition: lines.append(f"  - 정의: {definition}")
-            if cn:         lines.append(f"  - CN: `{cn}`")
-            if content_url: lines.append(f"  - 상세보기: {content_url}")
-            if pdf_url:    lines.append(f"  - PDF: {pdf_url}")
+            if pub_date:                       lines.append(f"  - 생성일: {pub_date}")
+            if r.get("RelatedKeywords"):       lines.append(f"  - 연관키워드: {_clean_html(r['RelatedKeywords'])}")
+            definition = _body(r.get("Definition", ""), include_body)
+            if definition:                     lines.append(f"  - 정의: {definition}")
+            if r.get("DefinitionSourceURL"):   lines.append(f"  - 정의 출처: {r['DefinitionSourceURL']}")
+            if r.get("CN"):                    lines.append(f"  - CN: `{r['CN']}`")
+            if r.get("ContentURL"):            lines.append(f"  - 상세보기: {r['ContentURL']}")
+            if r.get("PdfURL"):                lines.append(f"  - PDF: {r['PdfURL']}")
+            if r.get("ThumbnailURL"):          lines.append(f"  - 썸네일: {r['ThumbnailURL']}")
             lines.append("")
 
         return "\n".join(lines)
@@ -984,6 +1023,7 @@ async def scienceon_tech_trends(
 async def scienceon_weekly_news(
     date: str,
     max_results: int = 20,
+    include_body: bool = True,
 ) -> str:
     """
     금주의 과학기술뉴스를 조회합니다.
@@ -993,9 +1033,10 @@ async def scienceon_weekly_news(
         date: 조회 날짜 (형식: YYYYMMDD, 예: "20250224")
               해당 날짜가 포함된 주의 뉴스를 반환합니다.
         max_results: 최대 결과 수 (기본 20)
+        include_body: 내용 등 긴 텍스트 포함 여부 (기본 True). False면 내용을 제외합니다.
 
     Returns:
-        해당 주의 과학기술뉴스 목록 (제목, 내용요약, 국가전략기술분류, 원문URL)
+        해당 주의 과학기술뉴스 목록 (제목, 분류, 등록일, 내용, 원문URL)
     """
     if err := _check_credentials():
         return err
@@ -1013,17 +1054,12 @@ async def scienceon_weekly_news(
 
         lines = [f"**금주의 과학기술뉴스** | {date} | 총 {len(records)}건\n"]
         for i, r in enumerate(records, 1):
-            title      = r.get("sj", "제목 없음")
-            contents   = _truncate(r.get("contents", ""), 200)
-            category   = r.get("cdNm", "")
-            origin_url = r.get("originUrl", "")
-            reg_date   = r.get("registDt", "")
-
-            lines.append(f"**[{i}] {title}**")
-            if category:   lines.append(f"  - 분류: {category}")
-            if reg_date:   lines.append(f"  - 등록일: {reg_date}")
-            if contents:   lines.append(f"  - 내용: {contents}")
-            if origin_url: lines.append(f"  - 원문: {origin_url}")
+            lines.append(f"**[{i}] {r.get('sj', '제목 없음')}**")
+            if r.get("cdNm"):     lines.append(f"  - 분류: {r['cdNm']}")
+            if r.get("registDt"): lines.append(f"  - 등록일: {r['registDt']}")
+            contents = _body(r.get("contents", ""), include_body)
+            if contents:          lines.append(f"  - 내용: {contents}")
+            if r.get("originUrl"): lines.append(f"  - 원문: {r['originUrl']}")
             lines.append("")
 
         return "\n".join(lines)
